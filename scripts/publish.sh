@@ -33,7 +33,23 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 BRANCH="${PUBLISH_BRANCH:-publish}"
+REMOTE="${PUBLISH_REMOTE:-github}"
 SOURCE="${1:-HEAD}"
+
+# Der letzte Schritt bleibt bewusst von Hand: dieses Skript baut den Stand, das Veroeffentlichen
+# entscheidet der Mensch. Der Hinweis erscheint auch dann, wenn der Baum schon einen Commit hat -
+# gebaut heisst nicht gepusht, und genau diese beiden Zustaende verwechselt man sonst.
+push_hint() {
+    echo
+    echo "Noch zu tun - veroeffentlichen mit:"
+    echo
+    echo "    git push $REMOTE $BRANCH:main"
+    if ! git remote get-url "$REMOTE" >/dev/null 2>&1; then
+        echo
+        echo "Die Gegenstelle $REMOTE fehlt noch:"
+        echo "    git remote add $REMOTE <url>"
+    fi
+}
 
 git rev-parse -q --verify "$SOURCE^{commit}" >/dev/null \
     || { echo "Unbekannte Quelle: $SOURCE" >&2; exit 1; }
@@ -112,7 +128,8 @@ PARENT=()
 if git rev-parse -q --verify "refs/heads/$BRANCH" >/dev/null; then
     PREVIOUS=$(git rev-parse "refs/heads/$BRANCH")
     if [[ "$(git rev-parse "$PREVIOUS^{tree}")" == "$TREE" ]]; then
-        echo "Der Baum von $SOURCE ist bereits als $(git rev-parse --short "$PREVIOUS") veroeffentlicht."
+        echo "Der Baum von $SOURCE liegt bereits als $(git rev-parse --short "$PREVIOUS") im Zweig $BRANCH."
+        push_hint
         exit 0
     fi
     PARENT=(-p "$PREVIOUS")
@@ -127,11 +144,6 @@ COMMIT=$(
 )
 git update-ref "refs/heads/$BRANCH" "$COMMIT"
 
-echo "Zweig $BRANCH steht jetzt auf $(git rev-parse --short "$COMMIT") - \"$MESSAGE\""
+echo "Geprueft und gebaut: Zweig $BRANCH steht auf $(git rev-parse --short "$COMMIT") - \"$MESSAGE\""
 echo "Commits in diesem Zweig: $(git rev-list --count "$BRANCH")"
-echo
-echo "Veroeffentlichen:"
-echo "    git push github $BRANCH:main"
-echo
-echo "Falls die Gegenstelle noch fehlt:"
-echo "    git remote add github git@github.com:<konto>/kvasir-mcp-server.git"
+push_hint

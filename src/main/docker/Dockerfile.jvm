@@ -1,0 +1,64 @@
+####
+# Kvasir as a JVM container image.
+#
+# Build the application first, then the image from the PROJECT ROOT (the build context has to
+# contain both target/quarkus-app and models/):
+#
+#     ./mvnw clean package
+#     docker build -f src/main/docker/Dockerfile.jvm -t registry.example.com/kvasir:latest .
+#
+# Run it:
+#
+#     docker run -i --rm -p 8080:8080 \
+#       -e AWS_ACCESS_KEY_ID=... -e AWS_SECRET_ACCESS_KEY=... -e AWS_REGION=us-east-1 \
+#       registry.example.com/kvasir:latest
+#
+# LAYER ORDER IS THE POINT OF THIS FILE
+#
+# The layers are copied from "changes never" to "changes every build", because a layer invalidates
+# every layer after it:
+#
+#     models/   482 MB   changes only when the embedding model changes, which forces a full reindex
+#     lib/      292 MB   changes when a dependency changes
+#     quarkus/  1.2 MB   generated, changes on every build
+#     app/      108 KB   this application's own classes
+#
+# Copying the model after the application would push 482 MB through the registry on every single
+# code change. This way it is pushed once.
+#
+# MEMORY
+#
+# Measured, not guessed: with -Xmx256m the process settles at ~1150 MB RSS, and ten searches move
+# that by 10 MB. Almost all of it is off heap - the ONNX model - while the JVM heap stays under
+# 200 MB committed. Anyone sizing this from heap metrics will set a limit that gets the pod OOM
+# killed. See deploy/ for requests and limits.
+#
+# No heap option is set here on purpose. The JVM defaults to 25% of the container limit, which at
+# a 2Gi limit is 512 MB and leaves room for the ~1 GB the model needs beside it.
+###
+FROM registry.access.redhat.com/ubi9/openjdk-25-runtime:1.24
+
+ENV LANGUAGE='en_US:en'
+
+# The embedding model, first and therefore cached across ordinary builds. Not in the repository -
+# scripts/download-embedding-model.sh fetches it, and .dockerignore lets it into the context.
+COPY --chown=185 models/ /opt/kvasir/models/
+
+# Absolute paths, so the model is found no matter what the working directory is. The defaults in
+# application.properties are relative and only suit a run from a checkout.
+ENV DOCS_EMBEDDING_ONNX_PATH="/opt/kvasir/models/multilingual-e5-small/model.onnx"
+ENV DOCS_EMBEDDING_TOKENIZER_PATH="/opt/kvasir/models/multilingual-e5-small/tokenizer.json"
+
+# The application, ordered from least to most often changed.
+COPY --chown=185 target/quarkus-app/lib/ /deployments/lib/
+COPY --chown=185 target/quarkus-app/*.jar /deployments/
+COPY --chown=185 target/quarkus-app/quarkus/ /deployments/quarkus/
+COPY --chown=185 target/quarkus-app/app/ /deployments/app/
+
+EXPOSE 8080
+USER 185
+
+ENV JAVA_OPTS_APPEND="-Dquarkus.http.host=0.0.0.0 -Djava.util.logging.manager=org.jboss.logmanager.LogManager"
+ENV JAVA_APP_JAR="/deployments/quarkus-run.jar"
+
+ENTRYPOINT [ "/opt/jboss/container/java/run/run-java.sh" ]

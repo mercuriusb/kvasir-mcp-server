@@ -1,0 +1,50 @@
+Release notes
+=============
+
+Version 2.18.2
+Fixed a regression where polymorphic deserialization ignored the configured default implementation when the type identifier was absent from the incoming document.
+
+Version 2.18.1
+Improved error messages for unknown properties; the message now names the offending property, the target type and the source location inside the document.
+
+Version 2.18.0
+Added support for record types as deserialization targets, including canonical constructors with more than the previously supported number of components.
+
+Version 2.17.3
+Reduced allocation in the streaming parser when reading long string values that span several buffer boundaries, which mainly helps large documents.
+
+Version 2.17.2
+Corrected handling of duplicate keys in objects; the last occurrence now wins consistently instead of depending on the configured node factory.
+
+Version 2.17.1
+The date module no longer writes time zone offsets twice when a formatter already contains an offset pattern of its own.
+
+Version 2.17.0
+Introduced a configuration flag that makes the mapper fail on trailing tokens after the first complete value in a document.
+
+Version 2.16.4
+Fixed a thread safety issue in the serializer cache that could surface as a missing serializer under heavy concurrent first use.
+
+Version 2.16.3
+Made the builder reject contradictory settings instead of silently preferring one of them, which previously produced surprising output.
+
+Version 2.16.2
+Annotations on interfaces are now taken into account when the implementing class carries none of its own, matching the documented behaviour.
+Version 2.16.1
+The mapper no longer caches negative lookups for polymorphic subtypes, so registering a module after the first read now takes effect as expected.
+
+Version 2.16.0
+Reworked the module registration API; modules are applied in registration order and a module may now depend on another being present.
+
+Version 2.15.4
+Fixed an off by one error in the pretty printer that indented the closing bracket of deeply nested arrays one level too far.
+
+Version 2.15.3
+Deserialization of enums is now case sensitive again by default, restoring the behaviour documented for the whole 2.x line.
+
+Version 2.15.2
+Large integers that do not fit into a long are read as BigInteger instead of overflowing silently, which previously corrupted values.
+
+Version 2.15.1
+The streaming generator flushes the underlying writer on close even when no value was written, so empty documents behave predictably.
+

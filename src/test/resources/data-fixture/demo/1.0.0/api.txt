@@ -1,0 +1,2 @@
+Die API besteht aus einer einzigen Klasse und einer Handvoll Methoden.
+Mehr Struktur hat diese Datei nicht, deshalb wird sie in Wortfenster zerlegt.

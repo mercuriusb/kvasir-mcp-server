@@ -1,0 +1,16 @@
+### Everything is excluded, then the few things the image needs are let back in. An allowlist and
+### not a blocklist on purpose: the credentials in .env must never reach the build context, and a
+### blocklist protects only against the files someone thought of.
+*
+
+### The packaged application (fast-jar layout). Build it first: ./mvnw clean package
+### The directory is named as well as its contents: an excluded directory is not descended into,
+### so re-including only the contents can leave nothing to find.
+!target/quarkus-app
+!target/quarkus-app/**
+
+### The embedding model, ~482 MB, copied as its own image layer. Not in Git; fetch it once with
+### scripts/download-embedding-model.sh. Without these lines the build fails at COPY rather than
+### producing an image that starts and then cannot embed anything.
+!models
+!models/**

@@ -1,0 +1,9 @@
+{
+  "skillOverrides": {
+    "daisyui": "off",
+    "frontend-design": "off",
+    "htmx": "off",
+    "paradedb-skill": "off",
+    "tailwind-design-system": "off"
+  }
+}

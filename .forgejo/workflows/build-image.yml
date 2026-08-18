@@ -1,0 +1,145 @@
+# Builds and pushes the container image.
+#
+# A commit builds an image, a tag names a release - and neither reaches the cluster on its own.
+# The manifests live in the GitOps repository k8s-flux, and what runs is decided by the image tag
+# recorded there. Building and deploying are separate steps on purpose: configuration can be
+# changed in that repository without a new release, and a release can be built without touching
+# the cluster.
+#
+# Written against this instance's actual runner, not a generic one. Its image already carries
+# JDK 25, Maven, Node and the Docker CLI, and the runner config mounts a shared Maven cache into
+# /root/.m2. That is why there is no setup-java step and no cache action for ~/.m2: both would be
+# work already done. On a stock runner those two steps have to be added back.
+#
+# The one thing the runner cannot supply is the embedding model. It is 482 MB, it is not in Git,
+# and the image bakes it in as its own layer - so the workflow fetches it and caches it, or every
+# build would pull half a gigabyte from Hugging Face.
+#
+# SECRET: REGISTRY_TOKEN - a Forgejo access token of the account that owns this repository,
+# scope write:package. That same account is used as the registry user, derived from the context.
+#
+# A repository secret only applies to its own repository, so the one in runner-base does not carry
+# over; without it the login step fails with "Password required" and nothing before it looks wrong.
+# Create it under the repository (Settings -> Actions -> Secrets), or once under the user account
+# so every repository sees it.
+name: Build image
+
+on:
+  push:
+    branches:
+      - "**"
+    tags:
+      - "v*"
+
+# Registry and image name are derived at run time, never written down here. Two reasons: the
+# repository is public and its host name is nobody else's business, and a derived value cannot go
+# stale when the project is forked or moved. GITHUB_SERVER_URL and github.repository are set by the
+# runner and describe the forge this very job runs on.
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Keyed on the download script, because that is what decides which model is fetched. A model
+      # change edits the script, changes the key, and forces a fresh download - and the image layer
+      # changes with it, which is correct: a different model means a full reindex.
+      - name: Cache the embedding model
+        uses: actions/cache@v4
+        with:
+          path: models
+          key: embedding-model-${{ hashFiles('scripts/download-embedding-model.sh') }}
+
+      # Idempotent: it skips files that are already there, so a cache hit makes this a no-op.
+      - name: Fetch the embedding model
+        run: scripts/download-embedding-model.sh
+
+      # Tests are deliberately not run here. They need the shared OpenSearch cluster and they own
+      # their index outright - the test profile creates it at startup and drops it at shutdown. Two
+      # workflow runs at once would delete each other's index and fail for a reason that has
+      # nothing to do with either commit. Running them needs an index prefix per run first:
+      #
+      #     ./mvnw test -D%test.docs.index.prefix=ci-${{ github.run_id }}-
+      #
+      # Left out rather than switched on untested.
+      - name: Build the application
+        run: ./mvnw --batch-mode clean package -DskipTests
+
+      # A commit and a release are two different things here, and they get different tags:
+      #
+      #   push to a branch  ->  <sha>            a build artifact. Provable, throwaway, nothing in
+      #                                          the cluster ever points at it.
+      #   push of tag vX    ->  <version>, latest  a release. This is the tag the cluster runs, and
+      #                                          it is immutable: v1.2.3 names one image forever.
+      #
+      # The version is the git tag with its leading v removed, so tag v1.2.3 becomes image 1.2.3.
+      # Read out of github.ref rather than github.ref_name, because that one commits to a context
+      # field this runner has not been shown to provide.
+      - name: Determine the tags
+        id: tags
+        run: |
+          REGISTRY="${GITHUB_SERVER_URL#*://}"
+          [ -n "$REGISTRY" ] || { echo "GITHUB_SERVER_URL is empty - set REGISTRY by hand" >&2; exit 1; }
+          IMAGE="$REGISTRY/${{ github.repository }}"
+          echo "registry=$REGISTRY" >> "$GITHUB_OUTPUT"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+
+          REF="${{ github.ref }}"
+          case "$REF" in
+              refs/tags/*)
+                  VERSION="${REF#refs/tags/}"
+                  VERSION="${VERSION#v}"
+                  TAGS="$IMAGE:$VERSION,$IMAGE:latest"
+                  echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+                  ;;
+              *)
+                  TAGS="$IMAGE:${{ github.sha }}"
+                  ;;
+          esac
+          echo "tags=$TAGS" >> "$GITHUB_OUTPUT"
+          echo "Tags: $TAGS"
+
+      # The account has to own the image namespace, which is why it comes from repository_owner
+      # rather than being typed in. Copying an account from another workflow is the easy mistake:
+      # one that pushes to its own namespace logs in as itself, and that account has no business
+      # writing packages under this one.
+      - name: Log in to the registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ steps.tags.outputs.registry }}
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.REGISTRY_TOKEN }}
+
+      # Context is the project root, because the build needs both target/quarkus-app and models/.
+      # What actually reaches the daemon is decided by .dockerignore, which is an allowlist - the
+      # .env with the S3 credentials must never end up in a build context.
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: src/main/docker/Dockerfile.jvm
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+
+      - name: Summary
+        run: |
+          echo "Pushed: ${{ steps.tags.outputs.tags }}"
+          case "${{ github.ref }}" in
+              refs/tags/*)
+                  echo
+                  echo "This is a release. Nothing in the cluster has changed yet - rolling out is"
+                  echo "a commit in the GitOps repository k8s-flux:"
+                  echo
+                  echo "    clusters/home/apps/kvasir/kustomization.yaml"
+                  echo "        newTag: \"${{ steps.tags.outputs.version }}\""
+                  ;;
+              *)
+                  echo
+                  echo "Branch build - nothing in the cluster points at this image."
+                  echo "Release it with: scripts/release.sh <version>"
+                  ;;
+          esac

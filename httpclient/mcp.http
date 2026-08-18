@@ -1,0 +1,230 @@
+# The MCP surface, spoken by hand. Normally an agent talks to this; calling it directly is for
+# seeing what the agent actually receives.
+#
+# The transport is Streamable HTTP with JSON-RPC over POST /mcp. Two things it insists on:
+#
+#   * Accept must name BOTH application/json and text/event-stream, otherwise the request is
+#     rejected before it reaches a tool.
+#   * The session from "initialize" is returned in the mcp-session-id response header and has to be
+#     sent back on every later request. The handler below stores it, so run "initialize" and then
+#     "initialized" once, and everything after that works.
+#
+# All four tools restrict their answer to one project and version - there is no request that
+# searches across projects, by design.
+
+### 1. initialize - start a session
+POST {{host}}/mcp
+Content-Type: application/json
+Accept: application/json, text/event-stream
+
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "initialize",
+  "params": {
+    "protocolVersion": "2024-11-05",
+    "capabilities": {},
+    "clientInfo": {
+      "name": "intellij-http-client",
+      "version": "1.0"
+    }
+  }
+}
+
+> {%
+    // Spelled the way the server actually returns it. HTTP header names are case insensitive on
+    // the wire, but valueOf() matches the string, so "mcp-session-id" would come back null here.
+    client.global.set("mcpSession", response.headers.valueOf("Mcp-Session-Id"));
+    client.test("session established", function () {
+        client.assert(response.status === 200, "expected 200, got " + response.status);
+        client.assert(client.global.get("mcpSession"), "no Mcp-Session-Id header returned");
+    });
+%}
+
+### 2. initialized - the notification that completes the handshake
+# A notification carries no id and gets no answer, so an empty 202 here is correct. Tool calls
+# before this one are refused.
+POST {{host}}/mcp
+Content-Type: application/json
+Accept: application/json, text/event-stream
+mcp-session-id: {{mcpSession}}
+
+{
+  "jsonrpc": "2.0",
+  "method": "notifications/initialized"
+}
+
+### 3. tools/list - what the agent sees
+# The descriptions in here are the contract with the agent: they are what makes it use
+# list_projects instead of guessing a project name.
+POST {{host}}/mcp
+Content-Type: application/json
+Accept: application/json, text/event-stream
+mcp-session-id: {{mcpSession}}
+
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "method": "tools/list"
+}
+
+### list_projects - everything, unpaged
+# Without limit there is no page size and hasMore is false. total and hasMore are always present,
+# so a short complete list can be told apart from a truncated one.
+POST {{host}}/mcp
+Content-Type: application/json
+Accept: application/json, text/event-stream
+mcp-session-id: {{mcpSession}}
+
+{
+  "jsonrpc": "2.0",
+  "id": 3,
+  "method": "tools/call",
+  "params": {
+    "name": "list_projects",
+    "arguments": {}
+  }
+}
+
+### list_projects - one page
+POST {{host}}/mcp
+Content-Type: application/json
+Accept: application/json, text/event-stream
+mcp-session-id: {{mcpSession}}
+
+{
+  "jsonrpc": "2.0",
+  "id": 4,
+  "method": "tools/call",
+  "params": {
+    "name": "list_projects",
+    "arguments": {
+      "offset": 0,
+      "limit": 2
+    }
+  }
+}
+
+### list_versions - oldest first, sorted semantically
+# Not alphabetically: that would put 2.10.0 before 2.8.11. Documentation that applies to every
+# version is not a version and does not show up here - it appears in search hits with version null.
+POST {{host}}/mcp
+Content-Type: application/json
+Accept: application/json, text/event-stream
+mcp-session-id: {{mcpSession}}
+
+{
+  "jsonrpc": "2.0",
+  "id": 5,
+  "method": "tools/call",
+  "params": {
+    "name": "list_versions",
+    "arguments": {
+      "project": "{{project}}"
+    }
+  }
+}
+
+### search_docs - hybrid search, BM25 and kNN fused by RRF
+# With few terms every one of them is required on the full text side; the vector side stays
+# unaffected by that rule. Hits keep their relevance order and are deliberately not sorted by
+# project or version - that would destroy the ranking the whole hybrid search exists for.
+POST {{host}}/mcp
+Content-Type: application/json
+Accept: application/json, text/event-stream
+mcp-session-id: {{mcpSession}}
+
+{
+  "jsonrpc": "2.0",
+  "id": 6,
+  "method": "tools/call",
+  "params": {
+    "name": "search_docs",
+    "arguments": {
+      "project": "{{project}}",
+      "version": "{{version}}",
+      "query": "parser configuration",
+      "topK": 5
+    }
+  }
+}
+
+### search_docs - restricted to one chunk type
+# type is one of: markdown, txt, html, javadoc, package-doc, source. Package documentation is only
+# reachable this way, since get_class_source is about classes.
+POST {{host}}/mcp
+Content-Type: application/json
+Accept: application/json, text/event-stream
+mcp-session-id: {{mcpSession}}
+
+{
+  "jsonrpc": "2.0",
+  "id": 7,
+  "method": "tools/call",
+  "params": {
+    "name": "search_docs",
+    "arguments": {
+      "project": "{{project}}",
+      "version": "{{version}}",
+      "query": "streaming api",
+      "topK": 3,
+      "type": "package-doc"
+    }
+  }
+}
+
+### get_class_source - the whole source file
+# Pinned to exactly this project and version; it never falls back to another one, because source
+# that merely looks plausible is worse than an error. Only classes that came from a sources archive
+# have their source indexed.
+POST {{host}}/mcp
+Content-Type: application/json
+Accept: application/json, text/event-stream
+mcp-session-id: {{mcpSession}}
+
+{
+  "jsonrpc": "2.0",
+  "id": 8,
+  "method": "tools/call",
+  "params": {
+    "name": "get_class_source",
+    "arguments": {
+      "project": "{{project}}",
+      "version": "{{version}}",
+      "fullyQualifiedClassName": "com.fasterxml.jackson.core.JsonParser"
+    }
+  }
+}
+
+### A wrong argument is a tool error, not a protocol error
+# The answer comes back as isError with a readable reason - here the list of the six valid types -
+# instead of a bare JSON-RPC "Internal error". An agent can correct itself from the former, not
+# from the latter.
+#
+# Note what is NOT an error: a limit above the maximum is capped at 500 rather than rejected, so
+# 9999 answers normally with limit 500.
+POST {{host}}/mcp
+Content-Type: application/json
+Accept: application/json, text/event-stream
+mcp-session-id: {{mcpSession}}
+
+{
+  "jsonrpc": "2.0",
+  "id": 9,
+  "method": "tools/call",
+  "params": {
+    "name": "search_docs",
+    "arguments": {
+      "project": "{{project}}",
+      "version": "{{version}}",
+      "query": "parser",
+      "type": "bogus"
+    }
+  }
+}
+
+> {%
+    client.test("bad type is a tool error", function () {
+        client.assert(response.body.result.isError === true, "expected isError true");
+    });
+%}

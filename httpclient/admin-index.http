@@ -1,0 +1,95 @@
+# Indexing: the administrative side of Kvasir, deliberately REST and not an MCP tool, so that no
+# agent can start a reindex. Pick the environment (dev / cluster) from the drop-down at the top
+# right; it supplies {{host}}, {{project}} and {{version}}.
+#
+# http-client.env.json is not in Git - it names addresses and stays local. A fresh clone therefore
+# has none, and the requests below will not resolve their variables until one exists. Create it
+# next to this file with the three names the requests use:
+#
+#     {
+#       "dev": { "host": "http://localhost:8080", "project": "jackson", "version": "2.22.1" }
+#     }
+#
+# A scan runs in the background: every POST answers 202 immediately with a scanId, and the result
+# is only visible under /admin/index/status. The scanId of the last POST is remembered, so the
+# status requests below can be run straight afterwards without copying anything by hand.
+
+### Full scan of the whole data directory
+# Everything under docs.data-dir. Unchanged files are skipped by fingerprint, so running this
+# repeatedly is cheap and idempotent.
+POST {{host}}/admin/index
+
+> {%
+    client.global.set("scanId", response.body.scanId);
+    client.test("accepted", function () {
+        client.assert(response.status === 202, "expected 202, got " + response.status);
+    });
+%}
+
+### Scan one project
+POST {{host}}/admin/index?project={{project}}
+
+> {%
+    client.global.set("scanId", response.body.scanId);
+%}
+
+### Scan one version of one project
+# Two versions of the same project may run side by side - they write disjoint chunks.
+POST {{host}}/admin/index?project={{project}}&version={{version}}
+
+> {%
+    client.global.set("scanId", response.body.scanId);
+%}
+
+### Force a rebuild, ignoring the fingerprints
+# For when the index is known to be wrong but the fingerprints still claim everything is current -
+# after restoring a snapshot, or after a change to mapping, chunking or embedding model. Note that
+# a forced run does not clean up deleted files, because the fingerprints say nothing about the
+# stock while it is being rebuilt.
+POST {{host}}/admin/index?project={{project}}&force=true
+
+> {%
+    client.global.set("scanId", response.body.scanId);
+%}
+
+### Status of the scan started above
+# Poll this until status is COMPLETED or FAILED. The counters tell the two interesting cases
+# apart: indexedFiles > 0 means work was done, skippedFiles > 0 means the fingerprints matched.
+GET {{host}}/admin/index/status?scan-id={{scanId}}
+
+> {%
+    client.test("known scan", function () {
+        client.assert(response.status === 200, "expected 200, got " + response.status);
+    });
+%}
+
+### Status of every scan, running and finished
+GET {{host}}/admin/index/status
+
+### Unknown scan id -> 404
+GET {{host}}/admin/index/status?scan-id=does-not-exist
+
+> {%
+    client.test("unknown id is rejected", function () {
+        client.assert(response.status === 404, "expected 404, got " + response.status);
+    });
+%}
+
+### version without project -> 400
+# version only narrows a project, so on its own it has no meaning.
+POST {{host}}/admin/index?version={{version}}
+
+> {%
+    client.test("version alone is rejected", function () {
+        client.assert(response.status === 400, "expected 400, got " + response.status);
+    });
+%}
+
+### Overlapping scan -> 409, carrying the running scan
+# Run this twice in a row without waiting: the second call collides with the first. The answer is
+# not just an error - it contains the running scan under runningScan, so you can follow that one
+# instead of guessing. Nothing is queued: a scan is idempotent, so retrying later is enough.
+#
+# Against a small project the first scan may well be finished before you get to the second call,
+# and then this returns 202. A full scan is the reliable way to see the conflict.
+POST {{host}}/admin/index?project={{project}}

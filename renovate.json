@@ -1,0 +1,91 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended"
+  ],
+  "timezone": "Europe/Berlin",
+  "labels": [
+    "dependencies"
+  ],
+  "prConcurrentLimit": 5,
+  "github-actions": {
+    "description": [
+      "Renovate only looks in .github/workflows by default. This repository is on Forgejo, so",
+      "without this the actions pinned in the build workflow would never be updated at all."
+    ],
+    "fileMatch": [
+      "^\\.forgejo/workflows/[^/]+\\.ya?ml$"
+    ]
+  },
+  "packageRules": [
+    {
+      "description": [
+        "Quarkus stays on the 3.33 LTS line. Patch releases within it are wanted - they are what",
+        "an LTS line is for - but 3.34 and later are not, because leaving LTS is a decision, not a",
+        "dependency bump.",
+        "",
+        "One rule covers all of it: quarkus-bom, quarkus-mcp-server-bom, quarkus-langchain4j-bom and",
+        "the Maven plugin all read the same quarkus.platform.version property, so a single update",
+        "would move the whole platform at once.",
+        "",
+        "The bound is written as a Maven range, not as '<3.34': allowedVersions is interpreted in",
+        "the versioning scheme of the datasource, which is maven here. The half-open upper bound is",
+        "what admits 3.33.3.1 while excluding every 3.34."
+      ],
+      "matchPackageNames": [
+        "io.quarkus.platform:**",
+        "io.quarkus:**",
+        "io.quarkiverse.**"
+      ],
+      "allowedVersions": "[3.33,3.34)",
+      "groupName": "Quarkus LTS 3.33"
+    },
+    {
+      "description": [
+        "The LangChain4j embedding artifacts are only ever released as -beta, so the usual advice",
+        "to ignore unstable versions would freeze them forever. Their versions come from",
+        "quarkus-langchain4j-bom, so this matters only if one is ever pinned directly."
+      ],
+      "matchPackageNames": [
+        "dev.langchain4j:**"
+      ],
+      "ignoreUnstable": false
+    },
+    {
+      "description": [
+        "The parser libraries are pinned in pom.xml and carry the real risk of a silent behaviour",
+        "change - chunking that shifts moves every chunk boundary and needs a full reindex. Kept",
+        "separate so such a bump is reviewed on its own rather than inside a batch."
+      ],
+      "matchPackageNames": [
+        "com.vladsch.flexmark:**",
+        "org.jsoup:**",
+        "com.github.javaparser:**"
+      ],
+      "groupName": "Parser-Bibliotheken"
+    },
+    {
+      "description": [
+        "The base image tag moves often and is low risk; the JDK line in its name is not something",
+        "Renovate should change - Java 25 is the minimum this project compiles against."
+      ],
+      "matchManagers": [
+        "dockerfile"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "patch"
+      ],
+      "automerge": false
+    }
+  ],
+  "vulnerabilityAlerts": {
+    "description": [
+      "A security fix is worth a pull request outside the usual schedule. The Quarkus pin above",
+      "still applies: a CVE fix inside 3.33.x comes through, a jump to 3.34 does not."
+    ],
+    "labels": [
+      "security"
+    ]
+  }
+}

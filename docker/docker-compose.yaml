@@ -1,0 +1,86 @@
+# Kvasir mit eigenem OpenSearch, für lokales Arbeiten ohne Cluster und ohne S3.
+#
+# Vorher einmalig, weil das Image beides braucht und beides nicht in Git liegt:
+#
+#     scripts/download-embedding-model.sh
+#     ./mvnw clean package
+#
+# Dann aus diesem Verzeichnis:
+#
+#     docker compose up
+#
+# Danach:  MCP unter http://localhost:8080/mcp,  Indexierung anstoßen mit
+#     curl -XPOST http://localhost:8080/admin/index
+#
+# Anders als im Cluster liest Kvasir hier das lokale data/-Verzeichnis statt S3. Möglich ist das
+# ohne jede Codeänderung, weil docs.data-dir nur ein NIO-Pfad ist: ein gewöhnlicher Pfad landet
+# auf dem Default-Dateisystem, eine URI beim Provider ihres Schemas.
+services:
+
+  opensearch:
+    image: opensearchproject/opensearch:3.8.0
+    environment:
+      # Ein Knoten, keine Wahl eines Masters, kein Warten auf Mitspieler.
+      - discovery.type=single-node
+      # Ohne das verlangt OpenSearch ab 2.12 ein Admin-Passwort und antwortet nur über https mit
+      # Zertifikaten, die hier niemand hat. Die Anwendung spricht auch im Cluster unverschlüsselt
+      # und ohne Anmeldung mit OpenSearch - lokal also derselbe Aufbau, nicht ein anderer.
+      - plugins.security.disabled=true
+      - OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m
+      # Der Container prüft beim Start freien Speicher und die vm.max_map_count des Hosts. Auf
+      # einem Entwicklungsrechner ist das eine Startbremse ohne Nutzen.
+      - DISABLE_INSTALL_DEMO_CONFIG=true
+      - bootstrap.memory_lock=true
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    ports:
+      # Nur zum Nachsehen von außen, etwa GET /_cat/indices. Kvasir spricht den Dienst intern an.
+      - "9200:9200"
+    volumes:
+      - opensearch-data:/usr/share/opensearch/data
+    healthcheck:
+      # Nicht schmückendes Beiwerk: ohne erreichbares OpenSearch startet Kvasir gar nicht, weil
+      # Hibernate Search beim Bootstrap die Cluster-Version abfragt und ohne Antwort abbricht.
+      # Deshalb wartet der Dienst unten auf genau diesen Test.
+      test: ["CMD-SHELL", "curl -fs http://localhost:9200/_cluster/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 20s
+
+  kvasir:
+    # Gebaut aus dem Projektwurzelverzeichnis, weil der Build-Kontext target/quarkus-app UND
+    # models/ enthalten muss. Für ein fertiges Image stattdessen:
+    #   image: <registry>/<owner>/kvasir-mcp-server:latest
+    build:
+      context: ..
+      dockerfile: src/main/docker/Dockerfile.jvm
+    depends_on:
+      opensearch:
+        condition: service_healthy
+    environment:
+      - QUARKUS_HIBERNATE_SEARCH_STANDALONE_ELASTICSEARCH_HOSTS=opensearch:9200
+      - QUARKUS_HIBERNATE_SEARCH_STANDALONE_ELASTICSEARCH_PROTOCOL=http
+      # Ein gewöhnlicher Pfad statt einer s3x-URI - damit entfällt der S3-Provider vollständig.
+      # Zugangsdaten braucht es folglich keine: die Verweise auf AWS_* in application.properties
+      # lösen zu Leerwerten auf, und leere Werte werden bewusst nicht als System-Property gesetzt,
+      # damit sie nichts verdecken.
+      - DOCS_DATA_DIR=/data
+    volumes:
+      # Bewusst dieses Verzeichnis und nicht das data/ im Projektwurzelverzeichnis: jenes ist die
+      # Spielwiese der Entwicklung, dieses der Korpus des Containers. Schreibgeschützt, weil
+      # Indexieren nur liest - der Index selbst liegt in OpenSearch.
+      - ./data:/data:ro
+    ports:
+      - "8080:8080"
+    # Gemessen: rund 1150 MB im Betrieb, fast alles außerhalb des Heaps im ONNX-Modell. Wer hier
+    # 1g einträgt, weil der JVM-Heap unter 200 MB bleibt, bekommt einen OOM-Kill beim ersten Start.
+    mem_limit: 2g
+
+volumes:
+  opensearch-data:

@@ -22,10 +22,14 @@ public record KnownFileHashes(Map<String, Fingerprint> byFileId) {
     public static final KnownFileHashes NONE = new KnownFileHashes(Map.of());
 
     /**
-     * What was recorded for a file: what it contained, and under which schema that content was
-     * turned into chunks.
+     * What was recorded for a file: which file it was, what it contained, and under which schema
+     * that content was turned into chunks.
+     * <p>
+     * The {@code file} is carried along because the id is hashed and cannot be taken apart again.
+     * Reading it here, in the query that runs once per project anyway, keeps the deletion of a
+     * vanished file from needing a lookup of its own.
      */
-    public record Fingerprint(String contentHash, int schemaVersion) {
+    public record Fingerprint(IndexedFile.FileRef file, String contentHash, int schemaVersion) {
     }
 
     public KnownFileHashes {
@@ -48,6 +52,11 @@ public record KnownFileHashes(Map<String, Fingerprint> byFileId) {
     /** Ids of every file recorded for this scope, whether or not the scan has reached it. */
     public Set<String> fileIds() {
         return byFileId.keySet();
+    }
+
+    /** What was recorded under this id, or {@code null} if nothing was. */
+    public Fingerprint get(String fileId) {
+        return byFileId.get(fileId);
     }
 
     public int size() {

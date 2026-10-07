@@ -2,6 +2,8 @@ package org.kvasir.parser;
 
 import java.util.Objects;
 
+import org.kvasir.entity.IdUtils;
+
 /**
  * Where a file came from, everything a parser needs to know beyond the content itself.
  *
@@ -32,7 +34,7 @@ public record SourceLocation(String project, String version, String path) {
      * unchanged file has to overwrite the same documents instead of adding duplicates.
      */
     public String chunkId(int index) {
-        return "%s/%s/%s#%d".formatted(project, version == null ? "-" : version, path, index);
+        return IdUtils.chunkId(project, version, path, String.valueOf(index));
     }
 
     /** The location of an entry inside this archive. */
@@ -47,6 +49,6 @@ public record SourceLocation(String project, String version, String path) {
 
     /** Same, but for chunks that are identified by a name rather than by their position. */
     public String chunkId(String discriminator) {
-        return "%s/%s/%s#%s".formatted(project, version == null ? "-" : version, path, discriminator);
+        return IdUtils.chunkId(project, version, path, discriminator);
     }
 }

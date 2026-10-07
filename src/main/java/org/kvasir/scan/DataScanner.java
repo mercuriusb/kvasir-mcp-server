@@ -152,8 +152,9 @@ public class DataScanner {
             if (seen.contains(fileId)) {
                 continue;
             }
-            LOG.infof("Removing %s: no longer present on disk", fileId);
-            status.fileRemoved(ingestor.forget(fileId));
+            KnownFileHashes.Fingerprint fingerprint = known.get(fileId);
+            LOG.infof("Removing %s: no longer present on disk", fingerprint.file().path());
+            status.fileRemoved(ingestor.forget(fileId, fingerprint.file()));
         }
     }
 

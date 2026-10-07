@@ -198,12 +198,13 @@ class DataScannerTest {
         SourceLocation location = new SourceLocation("demo", "1.0.0", "notes.md");
         String hash = "some-hash";
 
+        IndexedFile.FileRef file = new IndexedFile.FileRef("demo", "1.0.0", "notes.md");
         KnownFileHashes current = new KnownFileHashes(Map.of(
                 IndexedFile.idOf("demo", "1.0.0", "notes.md"),
-                new KnownFileHashes.Fingerprint(hash, IndexSchema.VERSION)));
+                new KnownFileHashes.Fingerprint(file, hash, IndexSchema.VERSION)));
         KnownFileHashes outdated = new KnownFileHashes(Map.of(
                 IndexedFile.idOf("demo", "1.0.0", "notes.md"),
-                new KnownFileHashes.Fingerprint(hash, IndexSchema.VERSION - 1)));
+                new KnownFileHashes.Fingerprint(file, hash, IndexSchema.VERSION - 1)));
 
         assertTrue(current.isUnchanged(location, hash));
         assertFalse(outdated.isUnchanged(location, hash),

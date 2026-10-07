@@ -18,10 +18,11 @@
         <flexmark.version>0.64.8</flexmark.version>
         <jsoup.version>1.23.1</jsoup.version>
         <javaparser.version>3.28.2</javaparser.version>
-        <jimfs.version>1.3.1</jimfs.version>
+        <jimfs.version>1.3.2</jimfs.version>
         <s3-nio.version>2.5.0</s3-nio.version>
+        <wiremock.version>3.13.2</wiremock.version>
         <skipITs>true</skipITs>
-        <surefire-plugin.version>3.5.4</surefire-plugin.version>
+        <surefire-plugin.version>3.5.6</surefire-plugin.version>
     </properties>
 
     <dependencyManagement>
@@ -131,6 +132,66 @@
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-smallrye-health</artifactId>
         </dependency>
+        <!--
+            Source catalog (planned, see CLAUDE.md "Geplant: Inhalte direkt aus Artifactory, Git
+            und Wiki"). What gets stored here is where content comes from - Maven coordinates, a
+            repository path and ref, a wiki space - never the content itself. Documents stay in the
+            search index, which remains the only durable copy of them.
+
+            Two Hibernate worlds share the classpath from here on, and confusing them is the
+            mistake to watch for: DocChunk and IndexedFile are mapped by the *standalone* Hibernate
+            Search mapper into OpenSearch, SourceDefinition is a JPA entity in Postgres. The
+            standalone mapper does not read ORM metadata, so an @Indexed on a JPA entity would
+            silently index nothing at all.
+
+            Retrieval must never depend on this datasource. Searching answers from the index alone;
+            an unreachable Postgres may stop indexing, exactly as an unreachable object store does
+            today, but it must not take the MCP tools down with it.
+        -->
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-hibernate-orm-panache</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-jdbc-postgresql</artifactId>
+        </dependency>
+        <!--
+            Versioned schema for that catalog. A drop-and-create strategy is out of the question:
+            the catalog is the only record of what is supposed to be indexed, and losing it means
+            nobody knows what to fetch again - the index itself does not say where its chunks came
+            from in a form that could be replayed.
+        -->
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-flyway</artifactId>
+        </dependency>
+        <!--
+            Per-source refresh interval. Released Maven versions are immutable and need looking at
+            exactly once; SNAPSHOTs, Git branches and wiki pages change under us and have to be
+            polled. Without a scheduler every update would need someone to call /admin/index.
+        -->
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-scheduler</artifactId>
+        </dependency>
+        <!--
+            Two dependencies deliberately NOT added, so nobody adds them by reflex later:
+
+            * No HTTP client extension. java.net.http.HttpClient covers this and brings two things
+              that matter here for free: it does not follow redirects unless told to - which is
+              exactly the rule that a source may never reach a host other than the one behind its
+              configured repository id - and BodyHandlers.ofFile streams a sources JAR of any size
+              straight to the temp file that DataStore would stage it in anyway, without it ever
+              being a byte[] on the heap. A declarative REST client would also fit badly: base URLs
+              come from the repository registry at runtime, not from build-time configuration.
+
+            * No Maven Resolver (org.apache.maven.resolver). Fetching one -sources.jar by exact
+              coordinates and reading maven-metadata.xml for the version list is a handful of GETs
+              and a StAX parse. The resolver would drag in settings.xml, mirrors and a local
+              repository - and with them the one behaviour the security rule forbids outright: a
+              silent fallback to Maven Central when a repository is not configured.
+        -->
         <dependency>
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-junit</artifactId>
@@ -151,6 +212,18 @@
             <groupId>com.google.jimfs</groupId>
             <artifactId>jimfs</artifactId>
             <version>${jimfs.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <!--
+            A stand-in for Artifactory, Forgejo and Confluence at HTTP level. The cases worth
+            testing are precisely the ones a real server will not perform on request: a 302 to
+            another host that must not be followed, an unchanged ETag that has to skip the download
+            entirely, a 404 on one artifact that must not fail the whole run, a hanging connection.
+        -->
+        <dependency>
+            <groupId>org.wiremock</groupId>
+            <artifactId>wiremock-standalone</artifactId>
+            <version>${wiremock.version}</version>
             <scope>test</scope>
         </dependency>
         <!-- Polling the asynchronous scan status without hand-rolled sleeps -->

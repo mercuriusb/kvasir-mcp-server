@@ -142,6 +142,37 @@ Zwei Feinheiten:
 - Aufgeräumt wird nur, wenn der Durchlauf des Projekts **fehlerfrei** war. Bricht das Verzeichnis
   mitten im Lauf weg, wäre sonst jede noch nicht erreichte Datei „gelöscht".
 
+### Ein vollständig entferntes Projekt bleibt liegen
+
+Verschwindet nicht eine einzelne Datei, sondern das ganze Projektverzeichnis, greift dieses
+Aufräumen **nicht**. `DataScanner.scan` läuft über `directoriesIn(dataRoot)`, also über das, was da
+ist; für ein Verzeichnis, das es nicht mehr gibt, wird `scanProject` nie aufgerufen und damit auch
+`forgetVanishedFiles` nie. Chunks und Fingerabdrücke des Projekts bleiben im Index, gleichgültig wie
+oft gescannt wird.
+
+Das ist mehr als Ballast: `list_projects` beantwortet sich aus dem Index und nennt das Projekt
+weiter. Ein Agent, für den diese Liste laut Tool-Beschreibung die Quelle der Wahrheit ist, wird also
+in eine Suche geschickt, deren Treffer aus einer Quelle stammen, die es nicht mehr gibt — und die
+Treffer sehen aus wie jede andere Antwort.
+
+Bis das behoben ist, hilft nur Löschen von Hand, und zwar in **beiden** Indizes, sonst entsteht
+genau die halbe Wiederherstellung von oben:
+
+```bash
+for IDX in kvasir-doc-chunk-write kvasir-indexed-file-write; do
+  curl -X POST "$OS/$IDX/_delete_by_query" -H 'Content-Type: application/json' \
+    -d '{"query":{"terms":{"project":["demo","other"]}}}'
+done
+```
+
+`project` ist in beiden Entities ein `@KeywordField`, die Term-Query trifft also exakt.
+
+Behebbar wäre es, weil die Fingerabdrücke sämtliche indexierten Projekte kennen: ein **Vollscan**
+könnte die Menge der angetroffenen Projekte gegen die Menge der vermerkten halten und die Differenz
+entfernen. Nur ein Vollscan — ein auf ein Projekt eingeschränkter Lauf weiß über die anderen nichts
+und würde sie alle für verschwunden halten. Und nicht auf einem `force`-Lauf, wo die Fingerabdrücke
+ohnehin nichts über den Bestand aussagen.
+
 ## Änderungen an der Indexstruktur
 
 ### Der Fall, den `IndexSchema.VERSION` löst
@@ -159,6 +190,7 @@ Hochzählen bei:
 - einem Feld, das in `DocChunk` hinzukommt, wegfällt oder den Typ wechselt
 - einem Wechsel des Embedding-Modells oder seiner Dimension
 - geänderten Chunking-Regeln in einem Parser
+- einem geänderten ID-Schema in `IdUtils`
 
 ### Der Fall, den sie nicht löst
 
@@ -190,6 +222,7 @@ musste weg, `kvasir-doc-chunk` blieb unangetastet.
 | Andere Embedding-Dimension | Ja — und zusätzlich sind alle bestehenden Vektoren wertlos |
 | Anderes Embedding-Modell, gleiche Dimension | Ja, inhaltlich: Vektoren aus zwei Modellen sind nicht vergleichbar. Das Mapping merkt es **nicht** — nur `IndexSchema.VERSION` fängt das ab |
 | Geändertes Chunking in einem Parser | Ja, inhaltlich — dito, nur über `IndexSchema.VERSION` |
+| Geändertes ID-Schema in `IdUtils` | Ja — jedes Dokument bekommt eine neue ID. Die alten werden **nicht** überschrieben, sondern erst von `deletePreviousChunks` beim Neuindexieren der Datei geräumt; ohne Reindex stünden beide Stände nebeneinander |
 | Neuer Parser für einen neuen Dateityp | Nein — bestehende Chunks bleiben gültig, die neuen Dateien kommen beim nächsten Scan dazu |
 | Geänderte Tool-Beschreibung, RRF-Gewichte, Paging | Nein — nichts davon steht im Index |
 
@@ -203,3 +236,5 @@ die Suche liefert trotzdem Unsinn. Sie sind der eigentliche Daseinsgrund von `In
   vorhanden: in `…-000002` schreiben, am Ende `-read` umhängen. Ob Hibernate Search das ausreichend
   unterstützt, ist nicht untersucht.
 - **Automatische Snapshots nach Zeitplan** — Betrieb, nicht Anwendungslogik.
+- **Ein vollständig entferntes Projekt aus dem Index räumen** (siehe oben). Der Vollscan hat alles,
+  was er dafür braucht; es fehlt der Abgleich der angetroffenen gegen die vermerkten Projekte.

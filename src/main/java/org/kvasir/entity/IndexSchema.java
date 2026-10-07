@@ -24,7 +24,7 @@ package org.kvasir.entity;
 public final class IndexSchema {
 
     /** Raise on any change to the mapping, the embedding or the chunking rules. */
-    public static final int VERSION = 1;
+    public static final int VERSION = 2;
 
     private IndexSchema() {
     }

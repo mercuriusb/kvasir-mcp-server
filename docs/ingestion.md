@@ -136,9 +136,10 @@ embed(chunks);                                      // 2
 // 3: Chunks schreiben, danach IndexedFile aktualisieren
 ```
 
-**Schritt 1 ist der, den man weglassen würde und dann bereut.** Chunk-IDs sind positionsbasiert
-(`…#0`, `…#1`, `…#2`). Schrumpft eine Markdown-Datei von drei Abschnitten auf einen, überschreibt
-der neue Lauf nur `#0` — `#1` und `#2` blieben als Waisen im Index und tauchten weiter in
+**Schritt 1 ist der, den man weglassen würde und dann bereut.** Ein Markdown-Chunk wird über seine
+Position in der Datei unterschieden — die ID selbst ist ein Hash, aber die laufende Nummer geht in
+ihn ein. Schrumpft eine Datei von drei Abschnitten auf einen, überschreibt der neue Lauf nur den
+Chunk zu Position 0; die zu 1 und 2 blieben als Waisen im Index und tauchten weiter in
 Suchergebnissen auf, mit Inhalt, der in der Datei nicht mehr steht. Die Löschabfrage trifft deshalb
 zwei Formen:
 

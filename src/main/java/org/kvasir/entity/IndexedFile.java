@@ -27,11 +27,14 @@ public class IndexedFile {
     @DocumentId
     private String id;
 
-    /** Aggregable so the consistency check can ask which projects have fingerprints at all. */
-    @KeywordField(aggregable = Aggregable.YES)
+    /**
+     * Aggregable so the consistency check can ask which projects have fingerprints at all.
+     * Projectable because the id no longer carries the parts — see {@link #idOf}.
+     */
+    @KeywordField(aggregable = Aggregable.YES, projectable = Projectable.YES)
     private String project;
 
-    @KeywordField
+    @KeywordField(projectable = Projectable.YES)
     private String version;
 
     /** Path of the file relative to the project directory. */
@@ -64,28 +67,19 @@ public class IndexedFile {
         this.schemaVersion = IndexSchema.VERSION;
     }
 
-    /**
-     * Splits an id back into its parts.
-     * <p>
-     * Only the path may contain slashes, and it comes last, so splitting on the first two is exact.
-     *
-     * @return project, version ({@code null} for cross-version files) and path
-     */
-    public static FileRef parseId(String id) {
-        String[] parts = id.split("/", 3);
-        if (parts.length < 3) {
-            throw new IllegalArgumentException("Not an indexed file id: " + id);
-        }
-        return new FileRef(parts[0], "-".equals(parts[1]) ? null : parts[1], parts[2]);
-    }
-
     /** The three values an id is made of. */
     public record FileRef(String project, String version, String path) {
     }
 
-    /** Same shape as the chunk ids, so a file and its chunks are recognisably related. */
+    /**
+     * Same shape as the chunk ids, so a file and its chunks are recognisably related.
+     * <p>
+     * The path is hashed and therefore cannot be read back out of an id. Whoever needs the parts
+     * projects them off the document instead — {@link ChunkIngestor#knownHashes} does, which is why
+     * project, version and path are all projectable above.
+     */
     public static String idOf(String project, String version, String path) {
-        return "%s/%s/%s".formatted(project, version == null ? "-" : version, path);
+        return IdUtils.fileId(project, version, path);
     }
 
     public String getId() {

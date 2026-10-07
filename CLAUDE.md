@@ -29,6 +29,8 @@ mehrerer Java-Projekte abrufen können, statt aus dem Trainingsstand zu raten od
 ## Kernanforderung 0: Datenquellen-Layout (`data`-Ordner)
 
 > Ablauf, Klassenrollen und Zwischenspeicherung der Umsetzung: [`docs/ingestion.md`](docs/ingestion.md)
+>
+> Sources-JARs eines Maven-Projekts automatisiert einspielen: [`docs/maven-import.md`](docs/maven-import.md)
 
 Alle Quellen werden zunächst über ein lokales Verzeichnis eingespielt, kein Crawling:
 
@@ -95,8 +97,19 @@ Neu-Embedding bei jedem Start).
 - **Der Pfad+Hash-Speicher ist ein zweites indexiertes Entity** `IndexedFile` (SHA-256 des Dateiinhalts). Er
   liegt im Suchindex, weil eine separate Datenbank für Rohdaten ein Nicht-Ziel ist und der Index Neustarts
   ohnehin übersteht.
-- **Vor dem Schreiben werden die bisherigen Chunks einer Datei entfernt.** Chunk-IDs sind positionsbasiert;
-  ohne das Löschen bliebe bei einer schrumpfenden Datei der Überhang als Waise im Index zurück.
+- **Vor dem Schreiben werden die bisherigen Chunks einer Datei entfernt.** Ein Chunk wird über seine
+  Position in der Datei unterschieden (Markdown, TXT, HTML) bzw. über Klasse und Signatur (Java); ohne
+  das Löschen bliebe bei einer schrumpfenden Datei der Überhang als Waise im Index zurück.
+- **Dokument-IDs entstehen ausschließlich in `IdUtils`**, in der Form `<project>/<version>/<md5>`.
+  Gehasht wird, was pro Chunk variiert: der Dateipfad **zusammen mit** dem Diskriminator. Dahinter
+  steht eine harte Grenze beider Backends — eine `_id` über 512 Bytes wird schon bei der
+  Request-Validierung abgelehnt, und damit scheitert der **gesamte** Bulk, nicht nur das eine
+  Dokument. Über 27 Bibliotheken gemessen: längster Pfad 207 Bytes, längster Diskriminator 851 (eine
+  generische Methode in `quarkus-core`). Nur den Pfad zu hashen hätte deshalb nicht gereicht.
+  `project` und `version` bleiben im Klartext, damit eine ID in einer Logzeile oder einem Bulk-Fehler
+  zuzuordnen bleibt. Abgeleitet und nicht zufällig (etwa als UUID), damit ein erneuter Scan dieselben
+  Dokumente schon von der Konstruktion her überschreibt und die Löschabfrage eine zweite,
+  unabhängige Sicherung bleibt statt der einzigen.
 - **Fehler werden je Projekt und je Datei isoliert.** Eine unlesbare Datei erhöht `failedFiles`, ein
   Projektverzeichnis, das sich nicht durchlaufen lässt, `failedProjects` — in beiden Fällen läuft der Scan
   weiter. Ein kaputtes Projekt darf die anderen nicht mitnehmen.
@@ -225,6 +238,121 @@ Retrieval nicht mitreißen.
 selbst — diese bleiben eigenständige, später hinzufügbare Bausteine, die lediglich `docs.data-dir` befüllen, ohne den
 Scanner/die Parser anzufassen. Eine zentrale Datenbank (z. B. PostgreSQL) für die Rohdokumente ist keine vorgesehene
 Option — das wäre ein zusätzliches, redundant zu haltendes System ohne Mehrwert gegenüber Datei-basiertem Storage.
+
+### Geplant: Inhalte direkt aus Artifactory, Git und Wiki
+
+> **Entwurf, nichts davon ist umgesetzt.** Festgehalten ist hier nur die Sicherheitsregel, weil sie die
+> Form des Datenmodells bestimmt und nachträglich nicht mehr einzuziehen wäre.
+
+Die Inhalte liegen in aller Regel schon woanders — in Artifactory, in Wikis, in Git-Repositories.
+Statt sie von Hand unter `docs.data-dir` zusammenzutragen, sollen sie künftig **direkt von dort**
+geholt werden; dauerhaft gespeichert wird dann nur noch die *Quelle*, nicht ihr Inhalt: bei
+Java-Quellen die Maven-Koordinaten, bei Dokumentation die URL eines Repositories oder einer Seite
+samt Filter. Der Inhalt wird für die Dauer eines Laufs materialisiert und danach verworfen — dasselbe
+Verfahren, das `DataStore` heute schon für Archive aus dem Objektspeicher anwendet.
+
+**Der Katalog in der Datenbank ist die einzige Wahrheit.** Weder Quellen noch die Systeme, aus
+denen sie stammen, stehen in `application.properties` — beides sind Zeilen, angelegt über
+`/admin/**`. `docs.data-dir` bleibt nur für den lokalen Fall bestehen. Drei Tabellen, PostgreSQL,
+Schlüssel als UUIDv7 (zeitgeordnet, deshalb Index-Lokalität beim Einfügen; Hibernate ORM 7 kann das
+ohne Zusatzbibliothek über `@UuidGenerator(style = VERSION_7)`):
+
+```sql
+project          id, name (unique), version_rule (jsonb)   -- der Name aus list_projects
+repository       id, name (unique), type, url,             -- das System: Artifactory, Forgejo, Wiki
+                 credentials_ref, enabled
+content_source   id, project_id -> project,                -- was von dort geholt wird
+                 repository_id -> repository,
+                 type, config (jsonb), enabled, refresh
+```
+
+**Ein Projekt ist die Bibliotheksfamilie, nicht das einzelne Artefakt.** `jackson` umfasst
+`jackson-core`, `jackson-databind` und `jackson-annotations`, `hibernate-search` seine fünf Module
+— je eine `content_source` pro Artefakt unter einem Projekt. Der Grund steht im Vertrag der
+MCP-Tools: `search_docs` ist auf **ein** Projekt beschränkt. Bei einem Projekt je Artefakt müsste
+ein Agent vorab wissen, dass `JsonParser` in `jackson-core` und `ObjectMapper` in
+`jackson-databind` liegt — genau das Wissen, wegen dessen Fehlen er überhaupt fragt. Kollisionen
+entstehen dabei keine: die logische URI enthält das Archiv, und die vollqualifizierten
+Klassennamen sind über eine Familie hinweg eindeutig, `get_class_source` bleibt also eindeutig
+beantwortbar.
+
+Das ist eine **Änderung am heutigen Bestand**, keine Beschreibung davon: der Index führt derzeit
+`jackson` und `jackson-annotations` getrennt (und `hibernate-search` als fünf Projekte). Ein
+Zusammenlegen ändert, was `list_projects` liefert, und erzwingt für die betroffenen Projekte einen
+vollständigen Neuaufbau.
+
+`config` trägt die typabhängigen Koordinaten — bei Maven `groupId`/`artifactId`/`classifier`, bei
+Git Pfad, Ref und Globs. Als `jsonb`, nicht als `text`: die Datenbank prüft dann beim Schreiben auf
+gültiges JSON, das Feld bleibt abfragbar, und `jsonb` normalisiert Schlüsselreihenfolge und
+Leerraum — nur deshalb ist eine Eindeutigkeitsbedingung über die Koordinaten überhaupt tragfähig.
+Frei ist das JSON trotzdem nicht: der Schreibpfad deserialisiert in einen typisierten Record je Art,
+damit eine fehlerhafte Quelle beim `POST` scheitert und nicht nachts im Scheduler.
+
+**Zugangsdaten stehen weiterhin nicht in der Datenbank**, sondern nur ihr Name (`credentials_ref`);
+den Wert löst der Server aus seiner Konfiguration auf. Sonst wäre ein Dump des Katalogs ein
+Tokendiebstahl und jedes Backup davon so zu behandeln wie ein Secret.
+
+**Was diese Entscheidung kostet, und was daraus folgt.** Mit den Repositories in der Datenbank
+entscheidet eine Schreiboperation darüber, welche Hosts dieser Server erreichen darf. Wer
+`/admin/**` erreicht, kann ein Repository auf einen internen Dienst zeigen lassen; der Server holt
+von dort, indexiert die Antwort, und `search_docs` liefert sie über den öffentlich gerouteten
+MCP-Endpunkt wieder aus. Der übliche Gegenschutz — private Adressbereiche sperren — ist hier
+wertlos, weil alles Legitime intern ist.
+
+Daraus folgt eine harte Voraussetzung: **`/admin/**` braucht Authentifizierung, bevor der
+Quellen-Katalog produktiv benutzt wird.** Bis dahin besteht der einzige Schutz darin, dass der
+Ingress `/admin/**` nicht veröffentlicht — eine Routing-Regel, keine Zugriffskontrolle. Der Weg
+dahin ist bereits vorgezeichnet (`quarkus.http.auth.permission."admin".paths=/admin/*`, siehe
+Abschnitt zum Admin-Endpoint) und wird damit von „später einmal" zu einer Bedingung.
+
+Zwei Regeln bleiben unabhängig davon bestehen, weil sie nichts kosten:
+
+- **Weiterleitungen werden nicht über den Host des Repositories hinaus verfolgt.** Sonst wäre jede
+  Beschränkung mit einem 302 auszuhebeln. `java.net.http.HttpClient` folgt von sich aus keiner
+  Weiterleitung — die Regel gilt also durch Konstruktion, nicht durch Sorgfalt.
+- **Verweisen im Inhalt wird nicht gefolgt.** Ein Wiki-Konnektor bewegt sich über die API innerhalb
+  eines genannten Space mit Tiefenbegrenzung; sobald er Links aus dem Dokument heraus verfolgt, ist
+  er ein Crawler, und die Angriffsfläche ist zurück.
+
+**Die Quellenart ist eine Spalte mit `CHECK`-Bedingung**, keine eigene Tabelle. Die Menge ist
+geschlossen und an Code gebunden — kein Typ ohne Resolver-Klasse, also kein neuer Typ ohne Deploy;
+eine Tabelle brächte nur eine undurchsichtige ID in Logs und einen Zustand, den es nicht geben
+darf: eine Zeile ohne zugehörigen Resolver, deren Quellen niemand je holt. Das Enum im Code ist die
+Wahrheit, in der Spalte steht sein Wire-Name (`maven`, nicht `MAVEN`) — dafür sorgt ein
+`AttributeConverter`, `@Enumerated(STRING)` würde die `CHECK`-Bedingung verletzen. Zu beachten:
+Hibernates `validate` prüft `CHECK`-Bedingungen nicht, ein neuer Enum-Wert ohne Migration scheitert
+also erst beim `INSERT`.
+
+**`version` entsteht über zwei getrennte Achsen**, beide typabhängig in `config` bzw. in
+`project.version_rule`:
+
+- **Ableitung** — woher der String kommt: `none` (→ `null`, gilt für alle Versionen, wie `doc/`
+  heute), `fixed` (Literal), `artifact` (die Maven-Version, richtig bei Familien im Gleichschritt
+  wie `hibernate-search`), `bom` (die Version der Familien-BOM, richtig bei Jackson, wo die
+  Artefakte eigene Kadenzen haben).
+- **Auswahl** — welche davon: `list`, `latest: n`, `range`, `pattern`, jeweils mit `exclude` und
+  `includePrereleases` (Default aus). `range` darf nach oben offen sein, wächst dann aber
+  unbegrenzt, weil die Löschregel nur entfernt, was die Quelle nicht mehr aufzählt — sinnvoll ist
+  er fast nur zusammen mit `latest`.
+
+Die Regel steht am **Projekt** und wird von den Quellen geerbt, kann dort aber überschrieben
+werden. Bei einer Familie ist „die drei neuesten Releases" eine Projektaussage; hinge sie an jeder
+Quelle einzeln, lösten die Artefakte unabhängig voneinander auf und `list_versions` zeigte eine
+Vereinigung von Versionen, unter denen jeweils nur ein Teil der Familie liegt.
+
+Zwei Regeln dazu, die nicht verhandelbar sind: **`null` ist kein Rückfallwert** — scheitert die
+Ableitung, scheitert die Einheit, denn ein fälschlich auf `null` gesetzter Chunk erschiene ab dann
+in den Ergebnissen *jeder* Versionsabfrage. Und **es wird nicht auf eine benachbarte Version
+ausgewichen**, wenn ein Artefakt zur gewählten Projektversion fehlt; das ist dieselbe Regel, der
+`get_class_source` schon folgt.
+
+Offen bleibt, wie tief die BOM-Auflösung gehen muss: `dependencyManagement` arbeitet mit
+Property-Platzhaltern, importiert weitere BOMs und erbt von einem Parent-POM. Für Jackson genügt
+eine flache Auflösung; das ist der Punkt, an dem ein echter Maven-Resolver doch noch nötig werden
+könnte.
+
+Der Katalog der Quellen ist **Metadaten, keine Rohdaten** — der Absatz oben bleibt also gültig:
+Dokumente selbst gehören weiterhin nicht in eine Datenbank.
 
 ## Kernanforderung 1: Multi-Projekt- und Multi-Version-Support
 
@@ -534,6 +662,9 @@ belegen.
 
 ## Indexierung als REST-Endpoint (kein MCP-Tool)
 
+> Die `409`-Zusage unten gilt **pro Instanz**. Was bei mehreren Pods bricht und wie die Sperre
+> clusterweit würde: [`docs/scaling.md`](docs/scaling.md)
+
 Das Auslösen des Scans von `data/` erfolgt über einen separaten **REST-Service** (JAX-RS/ Quarkus REST), nicht über ein
 MCP-Tool. Begründung: Indexierung ist ein administrativer, potenziell lang laufender und schreibender Vorgang — der
 MCP-Server soll für Agenten ein reines Retrieval-Interface bleiben, ohne dass ein Agent versehentlich (oder durch
@@ -658,12 +789,17 @@ data/<project>/<version>/**      (version-spezifisch)
 ## Nicht-Ziele (bewusst weglassen)
 
 - Kein LLM-Aufruf im Server selbst — nur Retrieval, keine Antwortgenerierung
-- Kein automatisches Crawlen beliebiger externer URLs — Quellen werden explizit lokal/aus Repo übergeben
-  (Angriffsfläche/Security)
-- Keine Auth im ersten Wurf — für lokale/interne Nutzung; OAuth 2.1 erst bei Remote-Multi-User-Bedarf nachrüsten
-- Kein Artifactory-/Wiki-/S3-Connector im Scanner selbst — `docs.data-dir` bleibt reine Datei-Pfad-Konfiguration,
-  quellsystemspezifisches Ziehen ist ein späterer, eigenständiger Baustein (siehe Kernanforderung 0)
-- Keine zentrale Rohdaten-Datenbank (z. B. PostgreSQL) — Dateisystem/S3 statt DB-Blobs
+- Kein automatisches Crawlen beliebiger externer URLs — geholt wird ausschließlich aus Repositories, die im
+  Katalog stehen; eine Quelle verweist auf eines davon, Weiterleitungen über dessen Host hinaus und Verweisen
+  im Inhalt wird nicht gefolgt (siehe Kernanforderung 0)
+- Keine Auth im ersten Wurf — für lokale/interne Nutzung; OAuth 2.1 erst bei Remote-Multi-User-Bedarf nachrüsten.
+  **Ausgenommen `/admin/**`, sobald der Quellen-Katalog in Betrieb geht**: ab dann entscheidet eine Schreiboperation
+  dort, welche Hosts der Server erreichen darf (siehe Kernanforderung 0)
+- Kein Artifactory-/Wiki-/S3-Connector im Scanner selbst — `docs.data-dir` bleibt reine Datei-Pfad-Konfiguration.
+  Quellsystemspezifisches Ziehen ist ein eigenständiger Baustein, der oberhalb der Parser ansetzt und sie unberührt
+  lässt (Entwurf: Kernanforderung 0, „Geplant: Inhalte direkt aus Artifactory, Git und Wiki")
+- Keine zentrale Rohdaten-Datenbank (z. B. PostgreSQL) — Dateisystem/S3 statt DB-Blobs. Ein Katalog der *Quellen*
+  (Koordinaten, URLs, Filter, Zugangsdaten-Referenz) fällt nicht darunter: das sind Metadaten, keine Dokumente
 - Kein manuelles Score-Mixing auf Rohwert-Ebene (BM25-Rohscore + Cosine-Rohscore per eigener Formel
   verrechnen/normalisieren) — die Fusion läuft ausschließlich über OpenSearchs RRF-Pipeline (Kernanforderung 4). Erlaubt
   und vorgesehen ist ausschließlich das Setzen der dortigen Pipeline-Parameter (`rank-constant`, `weight-bm25`,

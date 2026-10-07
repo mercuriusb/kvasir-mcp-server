@@ -85,25 +85,32 @@ public class ChunkIngestor {
      */
     public KnownFileHashes knownHashes(String project, String version) {
         Map<String, KnownFileHashes.Fingerprint> fingerprints = new HashMap<>();
-        try (SearchSession session = searchMapping.createSession()) {
-            SearchScroll<List<?>> scroll = session.search(IndexedFile.class)
-                    .select(f -> f.composite(f.id(String.class),
-                            f.field("contentHash", String.class),
-                            f.field("schemaVersion", Integer.class)))
-                    .where((f, root) -> {
-                        root.add(f.matchAll());
-                        if (project != null) {
-                            root.add(f.match().field("project").matching(project));
-                        }
-                        if (version != null) {
-                            root.add(f.match().field("version").matching(version));
-                        }
-                    })
-                    .scroll(SCROLL_SIZE);
+        try (SearchSession session = searchMapping.createSession();
+                // closed with the session: a scroll holds a snapshot of the index open on the
+                // cluster until it is cleared or times out, and closing the session does not do it
+                SearchScroll<List<?>> scroll = session.search(IndexedFile.class)
+                        .select(f -> f.composite(f.id(String.class),
+                                f.field("contentHash", String.class),
+                                f.field("schemaVersion", Integer.class),
+                                f.field("project", String.class),
+                                f.field("version", String.class),
+                                f.field("path", String.class)))
+                        .where((f, root) -> {
+                            root.add(f.matchAll());
+                            if (project != null) {
+                                root.add(f.match().field("project").matching(project));
+                            }
+                            if (version != null) {
+                                root.add(f.match().field("version").matching(version));
+                            }
+                        })
+                        .scroll(SCROLL_SIZE)) {
             for (SearchScrollResult<List<?>> page = scroll.next(); page.hasHits();
                     page = scroll.next()) {
                 for (List<?> row : page.hits()) {
                     fingerprints.put((String) row.get(0), new KnownFileHashes.Fingerprint(
+                            new IndexedFile.FileRef((String) row.get(3), (String) row.get(4),
+                                    (String) row.get(5)),
                             (String) row.get(1), (Integer) row.get(2)));
                 }
             }
@@ -169,9 +176,8 @@ public class ChunkIngestor {
      *
      * @return the number of chunks removed
      */
-    public int forget(String fileId) {
-        IndexedFile.FileRef ref = IndexedFile.parseId(fileId);
-        int removed = deletePreviousChunks(ref.project(), ref.version(), ref.path());
+    public int forget(String fileId, IndexedFile.FileRef file) {
+        int removed = deletePreviousChunks(file.project(), file.version(), file.path());
         try (SearchSession session = searchMapping.createSession()) {
             session.indexingPlan().purge(IndexedFile.class, fileId, null);
         }
@@ -180,17 +186,18 @@ public class ChunkIngestor {
 
     private int deletePreviousChunks(String project, String version, String filePath) {
         List<String> ids = new ArrayList<>();
-        try (SearchSession session = searchMapping.createSession()) {
-            SearchScroll<String> scroll = session.search(DocChunk.class)
-                    .select(f -> f.id(String.class))
-                    .where(f -> f.bool()
-                            .must(f.match().field("project").matching(project))
-                            .must(versionMatches(f, version))
-                            .must(f.bool()
-                                    .should(f.match().field("source").matching(filePath))
-                                    .should(f.wildcard().field("source")
-                                            .matching(SourceLocation.archiveEntryPrefix(filePath) + "*"))))
-                    .scroll(SCROLL_SIZE);
+        try (SearchSession session = searchMapping.createSession();
+                // see knownHashes: the scroll has to be closed, the session does not do it
+                SearchScroll<String> scroll = session.search(DocChunk.class)
+                        .select(f -> f.id(String.class))
+                        .where(f -> f.bool()
+                                .must(f.match().field("project").matching(project))
+                                .must(versionMatches(f, version))
+                                .must(f.bool()
+                                        .should(f.match().field("source").matching(filePath))
+                                        .should(f.wildcard().field("source")
+                                                .matching(SourceLocation.archiveEntryPrefix(filePath) + "*"))))
+                        .scroll(SCROLL_SIZE)) {
             for (SearchScrollResult<String> page = scroll.next(); page.hasHits(); page = scroll.next()) {
                 ids.addAll(page.hits());
             }

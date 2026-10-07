@@ -53,3 +53,8 @@ httpclient/http-client.private.env.json
 
 # Ortsspezifische Verbotsliste fuer scripts/publish.sh - gehoert nicht ins Repository
 .publish-deny
+
+# Sources-JARs, die scripts/import-maven-sources.sh unter data/ ablegt: Fremdcode, jederzeit
+# aus dem Maven-Repository wiederherstellbar, und im Cluster kommt er ohnehin aus S3. Die
+# Markdown-Fixtures unter data/ bleiben versioniert.
+data/**/*.jar
